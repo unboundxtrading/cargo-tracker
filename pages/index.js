@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import Head from "next/head";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine, Cell
+  Tooltip, ResponsiveContainer, ReferenceLine, Cell, ReferenceArea
 } from "recharts";
 
 var COLORS = {
@@ -46,7 +46,7 @@ function formatKg(val) {
 
 function TipTrade(props) {
   if (!props.active || !props.payload || !props.payload.length) return null;
-  var metric = props.metric || "value";
+  var m = props.metric || "value";
   return (
     <div style={{ background: "#1a1a2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "10px 14px", fontSize: 12, fontFamily: "JetBrains Mono, monospace", color: "#e0e0e0", maxWidth: 300 }}>
       <div style={{ fontWeight: 600, marginBottom: 6 }}>{props.label}</div>
@@ -54,10 +54,11 @@ function TipTrade(props) {
         return (
           <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 2 }}>
             <span style={{ color: p.color }}>{p.name}</span>
-            <span>{metric === "yoy" ? (p.value >= 0 ? "+" : "") + p.value.toFixed(1) + "%" : metric === "weight" ? formatKg(p.value) : formatB(p.value)}</span>
+            <span>{m === "yoy" ? (p.value >= 0 ? "+" : "") + p.value.toFixed(1) + "%" : m === "weight" ? formatKg(p.value) : formatB(p.value)}</span>
           </div>
         );
       })}
+      <div style={{ fontSize: 9, color: "#4b5563", marginTop: 4 }}>Click to set comparison point</div>
     </div>
   );
 }
@@ -75,6 +76,52 @@ function TipFBX(props) {
           </div>
         );
       })}
+      <div style={{ fontSize: 9, color: "#4b5563", marginTop: 4 }}>Click to set comparison point</div>
+    </div>
+  );
+}
+
+// Delta comparison banner
+function DeltaBanner(props) {
+  var ptA = props.ptA;
+  var ptB = props.ptB;
+  var dataKey = props.dataKey;
+  var onClear = props.onClear;
+  var m = props.metric || "value";
+
+  if (!ptA || !ptB) return null;
+
+  var valA = ptA[dataKey];
+  var valB = ptB[dataKey];
+  if (valA === undefined || valB === undefined || valA === null || valB === null) return null;
+
+  var dateA = ptA.month || ptA.date;
+  var dateB = ptB.month || ptB.date;
+  var diff = valB - valA;
+  var pct = valA !== 0 ? ((valB - valA) / Math.abs(valA)) * 100 : 0;
+  var isUp = diff >= 0;
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 12, padding: "8px 14px", marginBottom: 12, borderRadius: 8,
+      background: isUp ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
+      border: "1px solid " + (isUp ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)"),
+      flexWrap: "wrap",
+    }}>
+      <span style={{ fontSize: 11, color: "#9ca3af" }}>{dateA}</span>
+      <span style={{ fontSize: 11, color: "#4b5563" }}>→</span>
+      <span style={{ fontSize: 11, color: "#9ca3af" }}>{dateB}</span>
+      <span style={{ fontSize: 15, fontWeight: 700, color: isUp ? "#22c55e" : "#ef4444" }}>
+        {isUp ? "+" : ""}{pct.toFixed(2)}%
+      </span>
+      <span style={{ fontSize: 11, color: isUp ? "#22c55e" : "#ef4444" }}>
+        ({isUp ? "+" : ""}{m === "yoy" ? diff.toFixed(1) + "pp" : m === "weight" ? formatKg(diff) : formatB(diff)})
+      </span>
+      <span style={{ fontSize: 11, color: "#6b7280", marginLeft: 4 }}>{dataKey}</span>
+      <button onClick={onClear} style={{
+        marginLeft: "auto", padding: "2px 8px", borderRadius: 4, border: "1px solid rgba(255,255,255,0.1)",
+        background: "rgba(255,255,255,0.04)", color: "#6b7280", cursor: "pointer", fontSize: 10, fontFamily: "inherit",
+      }}>Clear</button>
     </div>
   );
 }
@@ -89,6 +136,10 @@ export default function Home() {
   var [selectedCountries, setSelectedCountries] = useState(["China", "Vietnam", "Mexico", "Japan", "Germany", "South Korea"]);
   var [selectedLanes, setSelectedLanes] = useState(["FBX01", "FBX03", "FBX11", "FBX13"]);
   var [lastUpdate, setLastUpdate] = useState(null);
+  // Compare state
+  var [compareA, setCompareA] = useState(null);
+  var [compareB, setCompareB] = useState(null);
+  var [compareKey, setCompareKey] = useState(null);
 
   var fetchTrade = useCallback(async function() {
     setLoading(true);
@@ -114,85 +165,45 @@ export default function Home() {
       if (!res.ok) return;
       var json = await res.json();
       if (json.data) setFbxData(json.data);
-    } catch (e) {
-      console.error("FBX fetch error:", e);
-    }
+    } catch (e) { console.error("FBX fetch error:", e); }
   }, []);
 
-  useEffect(function() {
-    fetchTrade();
-    fetchFBX();
-  }, [fetchTrade, fetchFBX]);
+  useEffect(function() { fetchTrade(); fetchFBX(); }, [fetchTrade, fetchFBX]);
 
-  // Transform raw data based on selected metric
   var tradeData = useMemo(function() {
     if (!rawData.length) return [];
-
-    // Group by month
     var byMonth = {};
     rawData.forEach(function(d) {
       if (!byMonth[d.month]) byMonth[d.month] = { month: d.month };
       byMonth[d.month][d.country] = d.totalValue;
       byMonth[d.month][d.country + "_weight"] = d.vesselWeight;
-      byMonth[d.month][d.country + "_vessel"] = d.vesselValue;
     });
-
-    var sorted = Object.values(byMonth).sort(function(a, b) {
-      return a.month.localeCompare(b.month);
-    });
-
-    if (metric === "value") {
-      return sorted;
-    }
-
+    var sorted = Object.values(byMonth).sort(function(a, b) { return a.month.localeCompare(b.month); });
     if (metric === "weight") {
       return sorted.map(function(m) {
         var row = { month: m.month };
-        Object.keys(COLORS).forEach(function(c) {
-          if (m[c + "_weight"]) row[c] = m[c + "_weight"];
-        });
+        Object.keys(COLORS).forEach(function(c) { if (m[c + "_weight"]) row[c] = m[c + "_weight"]; });
         return row;
       });
     }
-
     if (metric === "yoy") {
-      // Calculate YoY % change
       var result = [];
       for (var i = 0; i < sorted.length; i++) {
         var cur = sorted[i];
-        var curMonth = cur.month.slice(5, 7);
-        var curYear = parseInt(cur.month.slice(0, 4));
-        var prevKey = (curYear - 1) + "-" + curMonth;
+        var prevKey = (parseInt(cur.month.slice(0, 4)) - 1) + cur.month.slice(4);
         var prev = sorted.find(function(m) { return m.month === prevKey; });
         if (!prev) continue;
-
         var row = { month: cur.month };
         Object.keys(COLORS).forEach(function(c) {
-          if (cur[c] && prev[c] && prev[c] > 0) {
-            row[c] = ((cur[c] - prev[c]) / prev[c]) * 100;
-          }
+          if (cur[c] && prev[c] && prev[c] > 0) row[c] = ((cur[c] - prev[c]) / prev[c]) * 100;
         });
         result.push(row);
       }
       return result;
     }
-
     return sorted;
   }, [rawData, metric]);
 
-  function toggleCountry(c) {
-    setSelectedCountries(function(prev) {
-      return prev.includes(c) ? prev.filter(function(x) { return x !== c; }) : prev.concat([c]);
-    });
-  }
-
-  function toggleLane(l) {
-    setSelectedLanes(function(prev) {
-      return prev.includes(l) ? prev.filter(function(x) { return x !== l; }) : prev.concat([l]);
-    });
-  }
-
-  // Bar data from latest month (absolute values)
   var allMonths = useMemo(function() {
     var byMonth = {};
     rawData.forEach(function(d) {
@@ -202,22 +213,66 @@ export default function Home() {
     return Object.values(byMonth).sort(function(a, b) { return a.month.localeCompare(b.month); });
   }, [rawData]);
 
+  function toggleCountry(c) {
+    setSelectedCountries(function(prev) { return prev.includes(c) ? prev.filter(function(x) { return x !== c; }) : prev.concat([c]); });
+  }
+  function toggleLane(l) {
+    setSelectedLanes(function(prev) { return prev.includes(l) ? prev.filter(function(x) { return x !== l; }) : prev.concat([l]); });
+  }
+
+  function handleChartClick(data, keys) {
+    if (!data || !data.activePayload || !data.activePayload.length) return;
+    var point = data.activePayload[0].payload;
+    // Pick the first visible key that has a value
+    var key = null;
+    for (var i = 0; i < keys.length; i++) {
+      if (point[keys[i]] !== undefined && point[keys[i]] !== null) { key = keys[i]; break; }
+    }
+    if (!key) return;
+
+    if (!compareA) {
+      setCompareA(point);
+      setCompareKey(key);
+    } else if (!compareB) {
+      setCompareB(point);
+    } else {
+      setCompareA(point);
+      setCompareB(null);
+      setCompareKey(key);
+    }
+  }
+
+  function clearCompare() { setCompareA(null); setCompareB(null); setCompareKey(null); }
+
   var latestMonth = allMonths.length > 0 ? allMonths[allMonths.length - 1] : null;
   var barData = [];
   if (latestMonth) {
-    Object.keys(COLORS).forEach(function(c) {
-      if (latestMonth[c]) barData.push({ country: c, value: latestMonth[c] });
-    });
+    Object.keys(COLORS).forEach(function(c) { if (latestMonth[c]) barData.push({ country: c, value: latestMonth[c] }); });
     barData.sort(function(a, b) { return b.value - a.value; });
   }
 
-  var yAxisFormatter = metric === "yoy"
+  var yAxisFmt = metric === "yoy"
     ? function(v) { return (v >= 0 ? "+" : "") + v.toFixed(0) + "%"; }
     : metric === "weight"
     ? function(v) { return (v / 1e9).toFixed(1) + "B"; }
     : function(v) { return (v / 1e9).toFixed(0) + "B"; };
 
   var metricLabel = metric === "yoy" ? "YoY % Change" : metric === "weight" ? "Vessel Weight (kg)" : "Import Value (USD)";
+
+  // Find indices for reference area
+  var refAreaLeft = null;
+  var refAreaRight = null;
+  if (compareA && compareB && tab === "imports") {
+    var dateField = "month";
+    refAreaLeft = compareA[dateField];
+    refAreaRight = compareB[dateField];
+    if (refAreaLeft > refAreaRight) { var tmp = refAreaLeft; refAreaLeft = refAreaRight; refAreaRight = tmp; }
+  }
+  if (compareA && compareB && tab === "fbx") {
+    refAreaLeft = compareA.date;
+    refAreaRight = compareB.date;
+    if (refAreaLeft > refAreaRight) { var tmp2 = refAreaLeft; refAreaLeft = refAreaRight; refAreaRight = tmp2; }
+  }
 
   return (
     <>
@@ -234,16 +289,19 @@ export default function Home() {
             <span style={{ fontSize: 11, color: "#6b7280", letterSpacing: 1.5, textTransform: "uppercase" }}>
               {loading ? "Fetching from Census Bureau..." : error ? "Error: " + error : "Live - Latest: " + (allMonths.length > 0 ? allMonths[allMonths.length - 1].month : "")}
             </span>
-            {lastUpdate && <span style={{ fontSize: 10, color: "#374151" }}>- updated {lastUpdate.toLocaleTimeString()}</span>}
-            <button onClick={function() { fetchTrade(); fetchFBX(); }} disabled={loading} style={{ marginLeft: "auto", padding: "4px 12px", borderRadius: 4, background: "rgba(249,115,22,0.1)", border: "1px solid rgba(249,115,22,0.2)", color: "#f97316", cursor: loading ? "wait" : "pointer", fontSize: 11, fontFamily: "inherit" }}>
-              {loading ? "..." : "Refresh"}
-            </button>
+            {lastUpdate && <span style={{ fontSize: 10, color: "#374151" }}>- {lastUpdate.toLocaleTimeString()}</span>}
+            <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+              <a href="/sources" style={{ padding: "4px 12px", borderRadius: 4, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", color: "#6b7280", fontSize: 11, fontFamily: "inherit", textDecoration: "none" }}>Sources</a>
+              <button onClick={function() { fetchTrade(); fetchFBX(); }} disabled={loading} style={{ padding: "4px 12px", borderRadius: 4, background: "rgba(249,115,22,0.1)", border: "1px solid rgba(249,115,22,0.2)", color: "#f97316", cursor: loading ? "wait" : "pointer", fontSize: 11, fontFamily: "inherit" }}>
+                {loading ? "..." : "Refresh"}
+              </button>
+            </div>
           </div>
           <h1 style={{ fontSize: 26, fontWeight: 700, margin: 0, background: "linear-gradient(90deg, #f97316, #ef4444)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
             US Trade & Cargo Monitor
           </h1>
           <p style={{ fontSize: 12, color: "#6b7280", margin: "6px 0 0" }}>
-            Bilateral trade flows + container freight rates - Census Bureau + Freightos Baltic Index
+            Bilateral trade flows + container freight rates
           </p>
         </div>
 
@@ -254,7 +312,7 @@ export default function Home() {
             { k: "ranking", l: "Top Partners" },
           ].map(function(t) {
             return (
-              <button key={t.k} onClick={function() { setTab(t.k); }} style={{
+              <button key={t.k} onClick={function() { setTab(t.k); clearCompare(); }} style={{
                 padding: "7px 14px", borderRadius: 6, border: "none",
                 background: tab === t.k ? "rgba(249,115,22,0.15)" : "rgba(255,255,255,0.04)",
                 color: tab === t.k ? "#f97316" : "#6b7280",
@@ -271,13 +329,9 @@ export default function Home() {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
                 <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>US Imports by Country of Origin</h2>
                 <div style={{ display: "flex", gap: 4 }}>
-                  {[
-                    { k: "value", l: "Value ($)" },
-                    { k: "weight", l: "Weight (kg)" },
-                    { k: "yoy", l: "YoY %" },
-                  ].map(function(m) {
+                  {[{ k: "value", l: "Value ($)" }, { k: "weight", l: "Weight (kg)" }, { k: "yoy", l: "YoY %" }].map(function(m) {
                     return (
-                      <button key={m.k} onClick={function() { setMetric(m.k); }} style={{
+                      <button key={m.k} onClick={function() { setMetric(m.k); clearCompare(); }} style={{
                         padding: "3px 10px", borderRadius: 4, border: "none",
                         background: metric === m.k ? "rgba(249,115,22,0.2)" : "rgba(255,255,255,0.04)",
                         color: metric === m.k ? "#f97316" : "#6b7280",
@@ -287,10 +341,20 @@ export default function Home() {
                   })}
                 </div>
               </div>
-              <p style={{ fontSize: 11, color: "#6b7280", margin: "0 0 12px" }}>
-                {metricLabel} - Monthly - Source: US Census Bureau - ~35 day lag
-              </p>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 16 }}>
+              <p style={{ fontSize: 11, color: "#6b7280", margin: "0 0 8px" }}>{metricLabel} - Monthly - Census Bureau</p>
+
+              {/* Compare banner */}
+              {compareA && compareB && compareKey && (
+                <DeltaBanner ptA={compareA} ptB={compareB} dataKey={compareKey} onClear={clearCompare} metric={metric} />
+              )}
+              {compareA && !compareB && (
+                <div style={{ padding: "6px 14px", marginBottom: 8, borderRadius: 6, background: "rgba(249,115,22,0.06)", border: "1px solid rgba(249,115,22,0.15)", fontSize: 11, color: "#f97316" }}>
+                  Point A set: {compareA.month} — now click a second point to compare
+                  <button onClick={clearCompare} style={{ marginLeft: 8, padding: "1px 6px", borderRadius: 3, border: "1px solid rgba(255,255,255,0.1)", background: "transparent", color: "#6b7280", cursor: "pointer", fontSize: 10, fontFamily: "inherit" }}>Cancel</button>
+                </div>
+              )}
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 12 }}>
                 {Object.keys(COLORS).map(function(c) {
                   var active = selectedCountries.includes(c);
                   return (
@@ -306,40 +370,48 @@ export default function Home() {
               </div>
               {tradeData.length > 0 ? (
                 <ResponsiveContainer width="100%" height={420}>
-                  <LineChart data={tradeData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
+                  <LineChart data={tradeData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}
+                    onClick={function(d) { handleChartClick(d, selectedCountries); }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
                     <XAxis dataKey="month" tick={{ fontSize: 9, fill: "#6b7280" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} interval={metric === "yoy" ? 1 : 2} />
-                    <YAxis tick={{ fontSize: 10, fill: "#6b7280" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} tickFormatter={yAxisFormatter} />
+                    <YAxis tick={{ fontSize: 10, fill: "#6b7280" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} tickFormatter={yAxisFmt} />
                     <Tooltip content={function(p) { return TipTrade({...p, metric: metric}); }} />
                     {metric === "yoy" && <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" strokeDasharray="3 3" />}
+                    {refAreaLeft && refAreaRight && (
+                      <ReferenceArea x1={refAreaLeft} x2={refAreaRight} fill="rgba(249,115,22,0.08)" stroke="rgba(249,115,22,0.3)" strokeDasharray="3 3" />
+                    )}
                     {selectedCountries.map(function(c) {
-                      return <Line key={c} type="monotone" dataKey={c} stroke={COLORS[c] || "#999"} strokeWidth={2} dot={false} name={c} connectNulls={true} />;
+                      return <Line key={c} type="monotone" dataKey={c} stroke={COLORS[c] || "#999"} strokeWidth={2} dot={false} name={c} connectNulls={true} activeDot={{ r: 5, stroke: "#fff", strokeWidth: 2 }} />;
                     })}
                   </LineChart>
                 </ResponsiveContainer>
               ) : (
                 <div style={{ textAlign: "center", padding: 80, color: "#6b7280" }}>
-                  {loading ? "Loading 36 months of trade data from Census Bureau... (may take 60-90 sec)" : "No data available"}
+                  {loading ? "Loading 36 months from Census Bureau... (60-90 sec)" : "No data"}
                 </div>
               )}
-              <div style={{ marginTop: 14, padding: "10px 14px", borderRadius: 8, background: "rgba(249,115,22,0.05)", border: "1px solid rgba(249,115,22,0.12)", fontSize: 11, color: "#9ca3af" }}>
-                {metric === "yoy"
-                  ? "Year-over-year % change vs same month prior year. Positive = growth. Compare with SONAR IOTI for TEU volume trends."
-                  : metric === "weight"
-                  ? "Vessel shipping weight in kg. Best proxy for physical volume (TEU) from free public data. Does not include air freight."
-                  : "General Imports (CIF basis). All transport modes. Click country buttons to toggle."
-                }
+              <div style={{ marginTop: 10, padding: "8px 14px", borderRadius: 8, background: "rgba(249,115,22,0.05)", border: "1px solid rgba(249,115,22,0.12)", fontSize: 10, color: "#6b7280" }}>
+                {metric === "yoy" ? "YoY % vs same month prior year. Click two points to measure delta." : metric === "weight" ? "Vessel weight (kg). Proxy for physical volume. Click two points to compare." : "General Imports CIF. Click two points on the chart to measure the change between them."}
               </div>
             </div>
           )}
 
           {tab === "fbx" && (
             <div>
-              <h2 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 3px" }}>Container Freight Rates (Freightos Baltic Index)</h2>
-              <p style={{ fontSize: 11, color: "#6b7280", margin: "0 0 12px" }}>
-                Spot rate per 40ft container (FEU) - Weekly - $/FEU
-              </p>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 16 }}>
+              <h2 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 3px" }}>Container Freight Rates (FBX)</h2>
+              <p style={{ fontSize: 11, color: "#6b7280", margin: "0 0 8px" }}>$/FEU spot rate - Weekly</p>
+
+              {compareA && compareB && compareKey && (
+                <DeltaBanner ptA={compareA} ptB={compareB} dataKey={compareKey} onClear={clearCompare} metric="fbx" />
+              )}
+              {compareA && !compareB && (
+                <div style={{ padding: "6px 14px", marginBottom: 8, borderRadius: 6, background: "rgba(249,115,22,0.06)", border: "1px solid rgba(249,115,22,0.15)", fontSize: 11, color: "#f97316" }}>
+                  Point A: {compareA.date} — click second point
+                  <button onClick={clearCompare} style={{ marginLeft: 8, padding: "1px 6px", borderRadius: 3, border: "1px solid rgba(255,255,255,0.1)", background: "transparent", color: "#6b7280", cursor: "pointer", fontSize: 10, fontFamily: "inherit" }}>Cancel</button>
+                </div>
+              )}
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 12 }}>
                 {Object.entries(FBX_LANES).map(function(entry) {
                   var code = entry[0], lane = entry[1];
                   var active = selectedLanes.includes(code);
@@ -356,21 +428,25 @@ export default function Home() {
               </div>
               {fbxData.length > 0 ? (
                 <ResponsiveContainer width="100%" height={420}>
-                  <LineChart data={fbxData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
+                  <LineChart data={fbxData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}
+                    onClick={function(d) { handleChartClick(d, selectedLanes); }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
                     <XAxis dataKey="date" tick={{ fontSize: 9, fill: "#6b7280" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} />
                     <YAxis tick={{ fontSize: 10, fill: "#6b7280" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} tickFormatter={function(v) { return "$" + (v / 1000).toFixed(1) + "k"; }} />
                     <Tooltip content={TipFBX} />
+                    {refAreaLeft && refAreaRight && (
+                      <ReferenceArea x1={refAreaLeft} x2={refAreaRight} fill="rgba(249,115,22,0.08)" stroke="rgba(249,115,22,0.3)" strokeDasharray="3 3" />
+                    )}
                     {selectedLanes.map(function(code) {
-                      return <Line key={code} type="monotone" dataKey={code} stroke={FBX_COLORS[code] || "#999"} strokeWidth={2} dot={false} name={FBX_LANES[code].short} />;
+                      return <Line key={code} type="monotone" dataKey={code} stroke={FBX_COLORS[code] || "#999"} strokeWidth={2} dot={false} name={FBX_LANES[code].short} activeDot={{ r: 5, stroke: "#fff", strokeWidth: 2 }} />;
                     })}
                   </LineChart>
                 </ResponsiveContainer>
               ) : (
-                <div style={{ textAlign: "center", padding: 80, color: "#6b7280" }}>Loading FBX data...</div>
+                <div style={{ textAlign: "center", padding: 80, color: "#6b7280" }}>Loading...</div>
               )}
-              <div style={{ marginTop: 14, padding: "10px 14px", borderRadius: 8, background: "rgba(249,115,22,0.05)", border: "1px solid rgba(249,115,22,0.12)", fontSize: 11, color: "#9ca3af" }}>
-                FBX = Freightos Baltic Index. Spot rates for 40ft containers. Higher = tighter capacity / demand. Note: current data is approximate placeholder.
+              <div style={{ marginTop: 10, padding: "8px 14px", borderRadius: 8, background: "rgba(249,115,22,0.05)", border: "1px solid rgba(249,115,22,0.12)", fontSize: 10, color: "#6b7280" }}>
+                FBX spot rates. Click two points to measure change. Note: placeholder data pending live integration.
               </div>
             </div>
           )}
@@ -378,9 +454,7 @@ export default function Home() {
           {tab === "ranking" && (
             <div>
               <h2 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 3px" }}>Top US Import Partners</h2>
-              <p style={{ fontSize: 11, color: "#6b7280", margin: "0 0 16px" }}>
-                {latestMonth ? "Latest: " + latestMonth.month : "Loading..."} - Ranked by total import value
-              </p>
+              <p style={{ fontSize: 11, color: "#6b7280", margin: "0 0 16px" }}>{latestMonth ? "Latest: " + latestMonth.month : "Loading..."}</p>
               {barData.length > 0 ? (
                 <ResponsiveContainer width="100%" height={Math.max(400, barData.length * 36)}>
                   <BarChart data={barData} layout="vertical" margin={{ top: 5, right: 30, left: 80, bottom: 5 }}>
@@ -389,9 +463,7 @@ export default function Home() {
                     <YAxis type="category" dataKey="country" tick={{ fontSize: 11, fill: "#e0e0e0" }} axisLine={false} tickLine={false} width={75} />
                     <Tooltip formatter={function(v) { return formatB(v); }} contentStyle={{ background: "#1a1a2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, fontFamily: "JetBrains Mono", fontSize: 12 }} />
                     <Bar dataKey="value" radius={[0, 4, 4, 0]}>
-                      {barData.map(function(entry, i) {
-                        return <Cell key={i} fill={COLORS[entry.country] || "#6b7280"} opacity={0.8} />;
-                      })}
+                      {barData.map(function(entry, i) { return <Cell key={i} fill={COLORS[entry.country] || "#6b7280"} opacity={0.8} />; })}
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
@@ -402,20 +474,9 @@ export default function Home() {
           )}
         </div>
 
-        <div style={{ maxWidth: 1000, margin: "20px auto 0", background: "rgba(255,255,255,0.015)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 10, padding: "14px" }}>
-          <h3 style={{ fontSize: 12, fontWeight: 600, margin: "0 0 8px", color: "#f97316" }}>Data Sources</h3>
-          <div style={{ fontSize: 10, color: "#6b7280", lineHeight: 1.8 }}>
-            <div><strong>US Imports/Exports</strong>: Census Bureau International Trade API - Monthly - ~35 day lag - api.census.gov</div>
-            <div><strong>Vessel Weight</strong>: VES_WGT_MO field - shipping weight in kg via ocean vessel - best free proxy for TEU volume</div>
-            <div><strong>Container Freight Rates</strong>: Freightos Baltic Index (FBX) - Weekly - 12 trade lanes - fbx.freightos.com</div>
-            <div><strong>YoY %</strong>: Calculated as (current month - same month last year) / same month last year * 100</div>
-          </div>
-        </div>
-
-        <div style={{ maxWidth: 1000, margin: "12px auto 0", textAlign: "center" }}>
-          <a href="https://fed.rigatoni.ai" style={{ fontSize: 11, color: "#4b5563", textDecoration: "none" }}>
-            Fed Net Liquidity Monitor
-          </a>
+        <div style={{ maxWidth: 1000, margin: "16px auto 0", textAlign: "center", display: "flex", justifyContent: "center", gap: 20 }}>
+          <a href="/sources" style={{ fontSize: 11, color: "#4b5563", textDecoration: "none" }}>Data Sources</a>
+          <a href="https://fed.rigatoni.ai" style={{ fontSize: 11, color: "#4b5563", textDecoration: "none" }}>Fed Liquidity Monitor</a>
         </div>
 
         <style jsx global>{"\
