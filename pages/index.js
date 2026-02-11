@@ -30,7 +30,7 @@ var FBX_COLORS = {
   FBX02: "#fca5a5", FBX04: "#fdba74", FBX22: "#93c5fd", FBX21: "#67e8f9",
 };
 
-function formatB(val) {
+function formatB(val) {if (val < 0) return "-" + formatB(-val);
   if (!val) return "$0";
   if (val >= 1e9) return "$" + (val / 1e9).toFixed(1) + "B";
   if (val >= 1e6) return "$" + (val / 1e6).toFixed(0) + "M";
