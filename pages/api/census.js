@@ -20,55 +20,75 @@ const COUNTRIES = {
 };
 
 export default async function handler(req, res) {
-  const { type, months, countries } = req.query;
-  const tradeType = type === "exports" ? "exports" : "imports";
-  const ctyCodes = countries === "all" || !countries
-    ? Object.keys(COUNTRIES)
-    : countries.split(",");
+  const { months } = req.query;
   const monthList = months ? months.split(",") : generateLastNMonths(36);
+  const ctyCodes = Object.keys(COUNTRIES);
 
   try {
     const results = [];
+    
     for (const month of monthList) {
       const [year, mo] = month.split("-");
-      const getFields = tradeType === "imports"
-        ? "CTY_CODE,CTY_NAME,GEN_VAL_MO,VES_VAL_MO,VES_WGT_MO,AIR_VAL_MO,CON_VAL_MO"
-        : "CTY_CODE,CTY_NAME,ALL_VAL_MO,VES_VAL_MO,VES_WGT_MO,AIR_VAL_MO";
-      const url = `https://api.census.gov/data/timeseries/intltrade/${tradeType}/enduse?get=${getFields}&YEAR=${year}&MONTH=${mo}&SUMMARY_LVL=DET&key=${CENSUS_KEY}`;
+      
+      // Use the porths endpoint for country-level totals
+      // GEN_VAL_MO = general imports, VES_WGT_MO = vessel weight
+      const url = `https://api.census.gov/data/timeseries/intltrade/imports/porths?get=CTY_CODE,CTY_NAME,GEN_VAL_MO,VES_VAL_MO,VES_WGT_MO,AIR_VAL_MO&YEAR=${year}&MONTH=${mo}&COMM_LVL=HS0&SUMMARY_LVL=CGP&key=${CENSUS_KEY}`;
+      
       try {
         const r = await fetch(url);
-        if (!r.ok) continue;
-        const data = await r.json();
-        const headers = data[0];
-        const rows = data.slice(1);
-        for (const row of rows) {
-          const ctyCode = row[headers.indexOf("CTY_CODE")];
-          if (!ctyCodes.includes(ctyCode)) continue;
-          const entry = {
-            month: month,
-            ctyCode: ctyCode,
-            country: COUNTRIES[ctyCode] || row[headers.indexOf("CTY_NAME")],
-          };
-          if (tradeType === "imports") {
-            entry.totalValue = parseInt(row[headers.indexOf("GEN_VAL_MO")] || "0");
-            entry.vesselValue = parseInt(row[headers.indexOf("VES_VAL_MO")] || "0");
-            entry.vesselWeight = parseInt(row[headers.indexOf("VES_WGT_MO")] || "0");
-            entry.airValue = parseInt(row[headers.indexOf("AIR_VAL_MO")] || "0");
-            entry.consumptionValue = parseInt(row[headers.indexOf("CON_VAL_MO")] || "0");
-          } else {
-            entry.totalValue = parseInt(row[headers.indexOf("ALL_VAL_MO")] || "0");
-            entry.vesselValue = parseInt(row[headers.indexOf("VES_VAL_MO")] || "0");
-            entry.vesselWeight = parseInt(row[headers.indexOf("VES_WGT_MO")] || "0");
-            entry.airValue = parseInt(row[headers.indexOf("AIR_VAL_MO")] || "0");
-          }
-          results.push(entry);
+        if (!r.ok) {
+          // Fallback to enduse endpoint
+          const url2 = `https://api.census.gov/data/timeseries/intltrade/imports/enduse?get=CTY_CODE,CTY_NAME,GEN_VAL_MO,VES_VAL_MO,VES_WGT_MO,AIR_VAL_MO&YEAR=${year}&MONTH=${mo}&SUMMARY_LVL=DET&key=${CENSUS_KEY}`;
+          const r2 = await fetch(url2);
+          if (!r2.ok) continue;
+          const data2 = await r2.json();
+          processRows(data2, month, ctyCodes, results);
+          continue;
         }
-      } catch (e) { console.error("Failed " + month, e.message); }
+        const data = await r.json();
+        processRows(data, month, ctyCodes, results);
+      } catch (e) {
+        console.error("Failed " + month, e.message);
+      }
     }
+
+    // Deduplicate: if multiple rows per country per month, sum them
+    const grouped = {};
+    results.forEach(function(r) {
+      const key = r.month + "|" + r.ctyCode;
+      if (!grouped[key]) {
+        grouped[key] = { ...r };
+      } else {
+        grouped[key].totalValue += r.totalValue;
+        grouped[key].vesselValue += r.vesselValue;
+        grouped[key].vesselWeight += r.vesselWeight;
+        grouped[key].airValue += r.airValue;
+      }
+    });
+
     res.setHeader("Cache-Control", "s-maxage=86400, stale-while-revalidate=172800");
-    res.status(200).json({ type: tradeType, countries: COUNTRIES, data: results });
+    res.status(200).json({ type: "imports", countries: COUNTRIES, data: Object.values(grouped) });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+}
+
+function processRows(data, month, ctyCodes, results) {
+  if (!Array.isArray(data) || data.length < 2) return;
+  const headers = data[0];
+  const rows = data.slice(1);
+  for (const row of rows) {
+    const ctyCode = row[headers.indexOf("CTY_CODE")];
+    if (!ctyCodes.includes(ctyCode)) continue;
+    results.push({
+      month: month,
+      ctyCode: ctyCode,
+      country: COUNTRIES[ctyCode] || row[headers.indexOf("CTY_NAME")],
+      totalValue: parseInt(row[headers.indexOf("GEN_VAL_MO")] || "0"),
+      vesselValue: parseInt(row[headers.indexOf("VES_VAL_MO")] || "0"),
+      vesselWeight: parseInt(row[headers.indexOf("VES_WGT_MO")] || "0"),
+      airValue: parseInt(row[headers.indexOf("AIR_VAL_MO")] || "0"),
+    });
   }
 }
 
