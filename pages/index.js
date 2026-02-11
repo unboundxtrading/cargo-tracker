@@ -337,7 +337,7 @@ export default function Home() {
               </div>
 
               {tradeData.length > 0 ? (
-                <div onClick={handleChartClick} style={{ cursor: "crosshair" }}>
+                <div onClickCapture={handleChartClick} style={{ cursor: "crosshair", outline: "none", userSelect: "none" }} tabIndex={-1}>
                   <ResponsiveContainer width="100%" height={420}>
                     <LineChart data={tradeData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }} onMouseMove={handleMouseMove}>
                       <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
@@ -397,7 +397,7 @@ export default function Home() {
               </div>
 
               {fbxData.length > 0 ? (
-                <div onClick={handleChartClick} style={{ cursor: "crosshair" }}>
+                <div onClickCapture={handleChartClick} style={{ cursor: "crosshair", outline: "none", userSelect: "none" }} tabIndex={-1}>
                   <ResponsiveContainer width="100%" height={420}>
                     <LineChart data={fbxData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }} onMouseMove={handleMouseMove}>
                       <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
