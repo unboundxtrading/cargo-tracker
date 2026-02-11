@@ -25,15 +25,15 @@ export default async function handler(req, res) {
   const ctyCodes = countries === "all" || !countries
     ? Object.keys(COUNTRIES)
     : countries.split(",");
-  const monthList = months ? months.split(",") : generateLastNMonths(24);
+  const monthList = months ? months.split(",") : generateLastNMonths(36);
 
   try {
     const results = [];
     for (const month of monthList) {
       const [year, mo] = month.split("-");
       const getFields = tradeType === "imports"
-        ? "CTY_CODE,CTY_NAME,GEN_VAL_MO,VES_VAL_MO,AIR_VAL_MO,CON_VAL_MO"
-        : "CTY_CODE,CTY_NAME,ALL_VAL_MO,VES_VAL_MO,AIR_VAL_MO";
+        ? "CTY_CODE,CTY_NAME,GEN_VAL_MO,VES_VAL_MO,VES_WGT_MO,AIR_VAL_MO,CON_VAL_MO"
+        : "CTY_CODE,CTY_NAME,ALL_VAL_MO,VES_VAL_MO,VES_WGT_MO,AIR_VAL_MO";
       const url = `https://api.census.gov/data/timeseries/intltrade/${tradeType}/enduse?get=${getFields}&YEAR=${year}&MONTH=${mo}&SUMMARY_LVL=DET&key=${CENSUS_KEY}`;
       try {
         const r = await fetch(url);
@@ -52,11 +52,13 @@ export default async function handler(req, res) {
           if (tradeType === "imports") {
             entry.totalValue = parseInt(row[headers.indexOf("GEN_VAL_MO")] || "0");
             entry.vesselValue = parseInt(row[headers.indexOf("VES_VAL_MO")] || "0");
+            entry.vesselWeight = parseInt(row[headers.indexOf("VES_WGT_MO")] || "0");
             entry.airValue = parseInt(row[headers.indexOf("AIR_VAL_MO")] || "0");
             entry.consumptionValue = parseInt(row[headers.indexOf("CON_VAL_MO")] || "0");
           } else {
             entry.totalValue = parseInt(row[headers.indexOf("ALL_VAL_MO")] || "0");
             entry.vesselValue = parseInt(row[headers.indexOf("VES_VAL_MO")] || "0");
+            entry.vesselWeight = parseInt(row[headers.indexOf("VES_WGT_MO")] || "0");
             entry.airValue = parseInt(row[headers.indexOf("AIR_VAL_MO")] || "0");
           }
           results.push(entry);

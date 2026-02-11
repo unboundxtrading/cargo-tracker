@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import Head from "next/head";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, Cell
+  Tooltip, ResponsiveContainer, ReferenceLine, Cell
 } from "recharts";
 
 var COLORS = {
@@ -37,16 +37,24 @@ function formatB(val) {
   return "$" + val.toLocaleString();
 }
 
+function formatKg(val) {
+  if (!val) return "0";
+  if (val >= 1e9) return (val / 1e9).toFixed(1) + "B kg";
+  if (val >= 1e6) return (val / 1e6).toFixed(0) + "M kg";
+  return val.toLocaleString() + " kg";
+}
+
 function TipTrade(props) {
   if (!props.active || !props.payload || !props.payload.length) return null;
+  var metric = props.metric || "value";
   return (
-    <div style={{ background: "#1a1a2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "10px 14px", fontSize: 12, fontFamily: "JetBrains Mono, monospace", color: "#e0e0e0", maxWidth: 280 }}>
+    <div style={{ background: "#1a1a2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "10px 14px", fontSize: 12, fontFamily: "JetBrains Mono, monospace", color: "#e0e0e0", maxWidth: 300 }}>
       <div style={{ fontWeight: 600, marginBottom: 6 }}>{props.label}</div>
-      {props.payload.sort(function(a, b) { return b.value - a.value; }).map(function(p, i) {
+      {props.payload.filter(function(p) { return p.value !== undefined && p.value !== null; }).sort(function(a, b) { return Math.abs(b.value) - Math.abs(a.value); }).map(function(p, i) {
         return (
           <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 2 }}>
             <span style={{ color: p.color }}>{p.name}</span>
-            <span>{formatB(p.value)}</span>
+            <span>{metric === "yoy" ? (p.value >= 0 ? "+" : "") + p.value.toFixed(1) + "%" : metric === "weight" ? formatKg(p.value) : formatB(p.value)}</span>
           </div>
         );
       })}
@@ -73,9 +81,10 @@ function TipFBX(props) {
 
 export default function Home() {
   var [tab, setTab] = useState("imports");
+  var [metric, setMetric] = useState("value");
   var [loading, setLoading] = useState(true);
   var [error, setError] = useState(null);
-  var [tradeData, setTradeData] = useState([]);
+  var [rawData, setRawData] = useState([]);
   var [fbxData, setFbxData] = useState([]);
   var [selectedCountries, setSelectedCountries] = useState(["China", "Vietnam", "Mexico", "Japan", "Germany", "South Korea"]);
   var [selectedLanes, setSelectedLanes] = useState(["FBX01", "FBX03", "FBX11", "FBX13"]);
@@ -89,20 +98,7 @@ export default function Home() {
       if (!res.ok) throw new Error("Census API returned " + res.status);
       var json = await res.json();
       if (json.error) throw new Error(json.error);
-
-      var byMonth = {};
-      (json.data || []).forEach(function(d) {
-        if (!byMonth[d.month]) byMonth[d.month] = { month: d.month };
-        byMonth[d.month][d.country] = d.totalValue;
-        byMonth[d.month][d.country + "_vessel"] = d.vesselValue;
-        byMonth[d.month][d.country + "_air"] = d.airValue;
-      });
-
-      var sorted = Object.values(byMonth).sort(function(a, b) {
-        return a.month.localeCompare(b.month);
-      });
-
-      setTradeData(sorted);
+      setRawData(json.data || []);
       setLastUpdate(new Date());
     } catch (e) {
       console.error("Trade fetch error:", e);
@@ -128,6 +124,62 @@ export default function Home() {
     fetchFBX();
   }, [fetchTrade, fetchFBX]);
 
+  // Transform raw data based on selected metric
+  var tradeData = useMemo(function() {
+    if (!rawData.length) return [];
+
+    // Group by month
+    var byMonth = {};
+    rawData.forEach(function(d) {
+      if (!byMonth[d.month]) byMonth[d.month] = { month: d.month };
+      byMonth[d.month][d.country] = d.totalValue;
+      byMonth[d.month][d.country + "_weight"] = d.vesselWeight;
+      byMonth[d.month][d.country + "_vessel"] = d.vesselValue;
+    });
+
+    var sorted = Object.values(byMonth).sort(function(a, b) {
+      return a.month.localeCompare(b.month);
+    });
+
+    if (metric === "value") {
+      return sorted;
+    }
+
+    if (metric === "weight") {
+      return sorted.map(function(m) {
+        var row = { month: m.month };
+        Object.keys(COLORS).forEach(function(c) {
+          if (m[c + "_weight"]) row[c] = m[c + "_weight"];
+        });
+        return row;
+      });
+    }
+
+    if (metric === "yoy") {
+      // Calculate YoY % change
+      var result = [];
+      for (var i = 0; i < sorted.length; i++) {
+        var cur = sorted[i];
+        var curMonth = cur.month.slice(5, 7);
+        var curYear = parseInt(cur.month.slice(0, 4));
+        var prevKey = (curYear - 1) + "-" + curMonth;
+        var prev = sorted.find(function(m) { return m.month === prevKey; });
+        if (!prev) continue;
+
+        var row = { month: cur.month };
+        Object.keys(COLORS).forEach(function(c) {
+          if (cur[c] && prev[c] && prev[c] > 0) {
+            row[c] = ((cur[c] - prev[c]) / prev[c]) * 100;
+          }
+        });
+        result.push(row);
+      }
+      return result;
+    }
+
+    return sorted;
+  }, [rawData, metric]);
+
   function toggleCountry(c) {
     setSelectedCountries(function(prev) {
       return prev.includes(c) ? prev.filter(function(x) { return x !== c; }) : prev.concat([c]);
@@ -140,7 +192,17 @@ export default function Home() {
     });
   }
 
-  var latestMonth = tradeData.length > 0 ? tradeData[tradeData.length - 1] : null;
+  // Bar data from latest month (absolute values)
+  var allMonths = useMemo(function() {
+    var byMonth = {};
+    rawData.forEach(function(d) {
+      if (!byMonth[d.month]) byMonth[d.month] = { month: d.month };
+      byMonth[d.month][d.country] = d.totalValue;
+    });
+    return Object.values(byMonth).sort(function(a, b) { return a.month.localeCompare(b.month); });
+  }, [rawData]);
+
+  var latestMonth = allMonths.length > 0 ? allMonths[allMonths.length - 1] : null;
   var barData = [];
   if (latestMonth) {
     Object.keys(COLORS).forEach(function(c) {
@@ -148,6 +210,14 @@ export default function Home() {
     });
     barData.sort(function(a, b) { return b.value - a.value; });
   }
+
+  var yAxisFormatter = metric === "yoy"
+    ? function(v) { return (v >= 0 ? "+" : "") + v.toFixed(0) + "%"; }
+    : metric === "weight"
+    ? function(v) { return (v / 1e9).toFixed(1) + "B"; }
+    : function(v) { return (v / 1e9).toFixed(0) + "B"; };
+
+  var metricLabel = metric === "yoy" ? "YoY % Change" : metric === "weight" ? "Vessel Weight (kg)" : "Import Value (USD)";
 
   return (
     <>
@@ -162,7 +232,7 @@ export default function Home() {
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
             <div style={{ width: 8, height: 8, borderRadius: "50%", background: error ? "#ef4444" : loading ? "#f59e0b" : "#22c55e", boxShadow: "0 0 8px " + (error ? "#ef4444" : loading ? "#f59e0b" : "#22c55e"), animation: "pulse 2s infinite" }} />
             <span style={{ fontSize: 11, color: "#6b7280", letterSpacing: 1.5, textTransform: "uppercase" }}>
-              {loading ? "Fetching from Census Bureau..." : error ? "Error: " + error : "Live - Latest: " + (tradeData.length > 0 ? tradeData[tradeData.length - 1].month : "")}
+              {loading ? "Fetching from Census Bureau..." : error ? "Error: " + error : "Live - Latest: " + (allMonths.length > 0 ? allMonths[allMonths.length - 1].month : "")}
             </span>
             {lastUpdate && <span style={{ fontSize: 10, color: "#374151" }}>- updated {lastUpdate.toLocaleTimeString()}</span>}
             <button onClick={function() { fetchTrade(); fetchFBX(); }} disabled={loading} style={{ marginLeft: "auto", padding: "4px 12px", borderRadius: 4, background: "rgba(249,115,22,0.1)", border: "1px solid rgba(249,115,22,0.2)", color: "#f97316", cursor: loading ? "wait" : "pointer", fontSize: 11, fontFamily: "inherit" }}>
@@ -198,9 +268,27 @@ export default function Home() {
 
           {tab === "imports" && (
             <div>
-              <h2 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 3px" }}>US Imports by Country of Origin</h2>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+                <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>US Imports by Country of Origin</h2>
+                <div style={{ display: "flex", gap: 4 }}>
+                  {[
+                    { k: "value", l: "Value ($)" },
+                    { k: "weight", l: "Weight (kg)" },
+                    { k: "yoy", l: "YoY %" },
+                  ].map(function(m) {
+                    return (
+                      <button key={m.k} onClick={function() { setMetric(m.k); }} style={{
+                        padding: "3px 10px", borderRadius: 4, border: "none",
+                        background: metric === m.k ? "rgba(249,115,22,0.2)" : "rgba(255,255,255,0.04)",
+                        color: metric === m.k ? "#f97316" : "#6b7280",
+                        cursor: "pointer", fontSize: 10, fontWeight: 600, fontFamily: "inherit",
+                      }}>{m.l}</button>
+                    );
+                  })}
+                </div>
+              </div>
               <p style={{ fontSize: 11, color: "#6b7280", margin: "0 0 12px" }}>
-                Monthly goods imports, billions USD - Source: US Census Bureau - ~35 day lag
+                {metricLabel} - Monthly - Source: US Census Bureau - ~35 day lag
               </p>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 16 }}>
                 {Object.keys(COLORS).map(function(c) {
@@ -220,21 +308,27 @@ export default function Home() {
                 <ResponsiveContainer width="100%" height={420}>
                   <LineChart data={tradeData} margin={{ top: 10, right: 20, left: 10, bottom: 10 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-                    <XAxis dataKey="month" tick={{ fontSize: 9, fill: "#6b7280" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} />
-                    <YAxis tick={{ fontSize: 10, fill: "#6b7280" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} tickFormatter={function(v) { return (v / 1e9).toFixed(0) + "B"; }} />
-                    <Tooltip content={TipTrade} />
+                    <XAxis dataKey="month" tick={{ fontSize: 9, fill: "#6b7280" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} interval={metric === "yoy" ? 1 : 2} />
+                    <YAxis tick={{ fontSize: 10, fill: "#6b7280" }} axisLine={{ stroke: "rgba(255,255,255,0.08)" }} tickLine={false} tickFormatter={yAxisFormatter} />
+                    <Tooltip content={function(p) { return TipTrade({...p, metric: metric}); }} />
+                    {metric === "yoy" && <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" strokeDasharray="3 3" />}
                     {selectedCountries.map(function(c) {
-                      return <Line key={c} type="monotone" dataKey={c} stroke={COLORS[c] || "#999"} strokeWidth={2} dot={false} name={c} />;
+                      return <Line key={c} type="monotone" dataKey={c} stroke={COLORS[c] || "#999"} strokeWidth={2} dot={false} name={c} connectNulls={true} />;
                     })}
                   </LineChart>
                 </ResponsiveContainer>
               ) : (
                 <div style={{ textAlign: "center", padding: 80, color: "#6b7280" }}>
-                  {loading ? "Loading 24 months of trade data from Census Bureau... (30-60 sec)" : "No data available"}
+                  {loading ? "Loading 36 months of trade data from Census Bureau... (may take 60-90 sec)" : "No data available"}
                 </div>
               )}
               <div style={{ marginTop: 14, padding: "10px 14px", borderRadius: 8, background: "rgba(249,115,22,0.05)", border: "1px solid rgba(249,115,22,0.12)", fontSize: 11, color: "#9ca3af" }}>
-                General Imports (CIF basis). All transport modes. Click country buttons to toggle. Data ~35 days behind.
+                {metric === "yoy"
+                  ? "Year-over-year % change vs same month prior year. Positive = growth. Compare with SONAR IOTI for TEU volume trends."
+                  : metric === "weight"
+                  ? "Vessel shipping weight in kg. Best proxy for physical volume (TEU) from free public data. Does not include air freight."
+                  : "General Imports (CIF basis). All transport modes. Click country buttons to toggle."
+                }
               </div>
             </div>
           )}
@@ -276,7 +370,7 @@ export default function Home() {
                 <div style={{ textAlign: "center", padding: 80, color: "#6b7280" }}>Loading FBX data...</div>
               )}
               <div style={{ marginTop: 14, padding: "10px 14px", borderRadius: 8, background: "rgba(249,115,22,0.05)", border: "1px solid rgba(249,115,22,0.12)", fontSize: 11, color: "#9ca3af" }}>
-                FBX = Freightos Baltic Index. Spot rates for 40ft containers. Higher = tighter capacity. Note: current FBX data is approximate placeholder - live integration pending.
+                FBX = Freightos Baltic Index. Spot rates for 40ft containers. Higher = tighter capacity / demand. Note: current data is approximate placeholder.
               </div>
             </div>
           )}
@@ -312,8 +406,9 @@ export default function Home() {
           <h3 style={{ fontSize: 12, fontWeight: 600, margin: "0 0 8px", color: "#f97316" }}>Data Sources</h3>
           <div style={{ fontSize: 10, color: "#6b7280", lineHeight: 1.8 }}>
             <div><strong>US Imports/Exports</strong>: Census Bureau International Trade API - Monthly - ~35 day lag - api.census.gov</div>
+            <div><strong>Vessel Weight</strong>: VES_WGT_MO field - shipping weight in kg via ocean vessel - best free proxy for TEU volume</div>
             <div><strong>Container Freight Rates</strong>: Freightos Baltic Index (FBX) - Weekly - 12 trade lanes - fbx.freightos.com</div>
-            <div>Values in USD. Imports are General Imports (CIF). FBX rates are per 40ft container (FEU).</div>
+            <div><strong>YoY %</strong>: Calculated as (current month - same month last year) / same month last year * 100</div>
           </div>
         </div>
 
